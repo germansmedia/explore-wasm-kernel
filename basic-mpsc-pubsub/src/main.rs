@@ -6,7 +6,6 @@
 // Notes:
 // - Exclusively reactive modules based on message handlers alone might not be the way forward, there is also need for active loops and checks.
 // - This implementation currently still misses a timer tick.
-// - The M in MPSC is not particularly useful, since the broker might also want to send messages to a single module.
 
 use {
     std::{
