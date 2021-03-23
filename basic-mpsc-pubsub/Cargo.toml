@@ -1,0 +1,19 @@
+[package]
+name = "basic-mpsc-pubsub"
+version = "0.1.0"
+authors = ["Desmond Germans <desmond@germansmedia.nl>"]
+edition = "2018"
+
+[profile.dev]
+opt-level = 0
+debug = true
+lto = true
+codegen-units = 14
+
+[profile.release]
+opt-level = 2
+debug = false
+lto = false
+codegen-units = 14
+
+[dependencies]
