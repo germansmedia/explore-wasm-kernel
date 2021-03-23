@@ -10,65 +10,59 @@
 
 use {
     std::{
-        time::Duration,
         thread,
         sync::mpsc::{
             Sender,
-            Receiver,
             channel,
         },
-        collections::HashSet,
+        collections::{
+            HashSet,
+            HashMap,
+        },
         cell::RefCell,
     }
 };
 
-// The generic handler type
-type Handler = fn(InMessage,&Sender<OutMessage>);
+// Module ID
+type MID = u64;
 
-// These are messages to communicate between modules
+// The generic handler type
+type Handler = fn(MID,Message,&Sender<Message>);
+
+// Application-specific messages
 #[derive(Clone)]
 pub enum AppMessage {
-    VideoFrame,  // hypothetical video frame
-    FaceCoords,  // hypothetical face coordinates
+    VideoFrame,               // hypothetical video frame
+    FaceCoords,               // hypothetical face coordinates
 }
 
-// These are all possible messages into the module
-pub enum InMessage {
-    Startup,                     // initialize the module
-    Shutdown,                    // shut down the module
-    Tick,                        // timer tick signal (just for this example)
-    Subscribed(String),          // indication that the module successfully subscribed to a topic
-    Unsubscribed(String),        // indicating that the module successfully unsubscribed from a topic
-    Generic(String,AppMessage),  // generic message from specific topic
-}
-
-// These are all possible messages out from the module, the API of the broker as seen by the module
-pub enum OutMessage {
-    Subscribe(String),           // "subscribe me to a topic"
-    Unsubscribe(String),         // "unsubscribe me from a topic"
-    Generic(String,AppMessage),  // "send AppMessage to a topic"
+// Overall messaging structure
+#[derive(Clone)]
+pub enum Message {
+    Startup,                  // initialize the module
+    Shutdown,                 // shut down the module
+    Tick,                     // timer tick signal (just for this example)
+    Subscribe(MID,String),    // "subscribe me to a topic"
+    Unsubscribe(MID,String),  // "unsubscribe me from a topic"
+    App(String,AppMessage),   // application-specific message to/from a topic
 }
 
 // A module
 pub struct Module {
-#[allow(dead_code)]
     name: String,                             // name of the module
+    mid: MID,                                 // unique module ID
     subscriptions: RefCell<HashSet<String>>,  // topics this module receiving from
-    in_tx: Sender<InMessage>,                 // broker-side sender to this module
-    out_rx: Receiver<OutMessage>,             // broker-side receiver from this module
+    in_tx: Sender<Message>,                   // broker-side sender to this module
 }
 
 // The broker owns the modules, so this API is from the broker's point of view
 impl Module {
-    fn new(name: &str,handler: Handler) -> Module {
+    fn new(name: &str,mid: MID,out_tx: Sender<Message>,handler: Handler) -> Module {
 
         println!("Creating module '{}'",name);
 
         // create channel from broker to module
-        let (in_tx,in_rx) = channel::<InMessage>();
-
-        // create channel from module to broker
-        let (out_tx,out_rx) = channel::<OutMessage>();
+        let (in_tx,in_rx) = channel::<Message>();
 
         // because of move semantics
         let local_name = name.to_string();
@@ -79,19 +73,19 @@ impl Module {
             println!("started thread for module '{}'",local_name);
 
             // blocking wait for a message
-            while let Ok(in_message) = in_rx.recv() {
+            while let Ok(message) = in_rx.recv() {
 
                 // and execute it
-                handler(in_message,&out_tx);
+                handler(mid,message,&out_tx);
             }
         });
 
         // return the running module to the broker
         Module {
             name: name.to_string(),
+            mid: mid,
             subscriptions: RefCell::new(HashSet::new()),
             in_tx: in_tx,
-            out_rx: out_rx,
         }    
     }
 }
@@ -99,26 +93,26 @@ impl Module {
 // A few test module handlers:
 
 // The camera module reads camera hardware (here triggered by a timer)
-fn camera_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
+fn camera_handler(_mid: MID,message: Message,out_tx: &Sender<Message>) {
 
-    match in_message {
+    match message {
 
         // camera does startup, initialize hardware, etc.
-        InMessage::Startup => {
+        Message::Startup => {
             println!("camera: Startup");
         },
 
         // camera does shutdown
-        InMessage::Shutdown => {
+        Message::Shutdown => {
             println!("camera: Shutdown");
         },
 
         // camera receives a timer tick
-        InMessage::Tick => {
+        Message::Tick => {
             println!("camera: Tick");
             println!("camera: Reading the camera hardware and publishing the video frame.");
             out_tx.send(
-                OutMessage::Generic("/frames".to_string(),AppMessage::VideoFrame)
+                Message::App("/frames".to_string(),AppMessage::VideoFrame)
             ).expect("out_tx.send() failed!");
         },
 
@@ -127,45 +121,35 @@ fn camera_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
     }
 }
 
-fn face_detector_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
+fn face_detector_handler(mid: MID,message: Message,out_tx: &Sender<Message>) {
     
-    match in_message {
+    match message {
 
         // face detector does startup, subscribe to the video topic
-        InMessage::Startup => {
+        Message::Startup => {
             println!("face_detector: Startup");
-            println!("face_detector: Subscribing to '/frames'");
+            println!("face_detector: Subscribing to topic '/frames'");
             out_tx.send(
-                OutMessage::Subscribe("/frames".to_string())
-            ).expect("face_detector: failed to subscribe to '/frames'.");
+                Message::Subscribe(mid,"/frames".to_string())
+            ).expect("face_detector: failed to subscribe to topic '/frames'.");
         },
 
         // face detector does shutdown
-        InMessage::Shutdown => {
+        Message::Shutdown => {
             println!("face_detector: Shutdown");
         },
 
-        // face detector wants to know when a subscription starts
-        InMessage::Subscribed(topic) => {
-            println!("face_detector: Broker notified me that I'm now subscribed to '{}'",topic);
-        },
-
-        // face detector wants to know when a subscription ends
-        InMessage::Unsubscribed(topic) => {
-            println!("face_detector: Broker notified me that I've unsubscribed from '{}'",topic);
-        },
-
         // face detector gets an AppMessage
-        InMessage::Generic(topic,app_message) => {
+        Message::App(topic,app_message) => {
 
             match app_message {
 
                 // face detector receives video frame
                 AppMessage::VideoFrame => {
-                    println!("face_detector: Received video frame from '{}'",topic);
+                    println!("face_detector: Received video frame from topic '{}'",topic);
                     println!("face_detector: Detecting face");
                     out_tx.send(
-                        OutMessage::Generic("/faces".to_string(),AppMessage::VideoFrame)
+                        Message::App("/faces".to_string(),AppMessage::FaceCoords)
                     ).expect("face_detector: failed to send video frame!");
                 },
 
@@ -179,42 +163,32 @@ fn face_detector_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
     }
 }
 
-fn display_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
+fn display_handler(mid: MID,message: Message,out_tx: &Sender<Message>) {
     
-    match in_message {
+    match message {
 
         // display does startup, subscribes to face coordinate topic
-        InMessage::Startup => {
+        Message::Startup => {
             println!("display: Startup");
-            println!("display: Subscribing to '/faces'");
+            println!("display: Subscribing to topic '/faces'");
             out_tx.send(
-                OutMessage::Subscribe("/faces".to_string())
-            ).expect("display: failed to subscribe to '/faces'");
+                Message::Subscribe(mid,"/faces".to_string())
+            ).expect("display: failed to subscribe to topic '/faces'");
         },
 
         // display does shutdown
-        InMessage::Shutdown => {
+        Message::Shutdown => {
             println!("display: Shutdown");
         },
 
-        // display wants to know when a subscription starts
-        InMessage::Subscribed(topic) => {
-            println!("display: Broker notified me that I'm now subscribed to '{}'",topic);
-        },
-
-        // display wants to know when a subscription ends
-        InMessage::Unsubscribed(topic) => {
-            println!("display: Broker notified me that I've unsubscribed from '{}'",topic);
-        },
-
         // display gets AppMessage
-        InMessage::Generic(topic,app_message) => {
+        Message::App(topic,app_message) => {
 
             match app_message {
 
                 // new face coordinates
                 AppMessage::FaceCoords => {
-                    println!("display: Received face coordinates from '{}'",topic);
+                    println!("display: Received face coordinates from topic '{}'",topic);
                 },
 
                 // and nothing else
@@ -230,60 +204,58 @@ fn display_handler(in_message: InMessage,out_tx: &Sender<OutMessage>) {
 // The main broker thread
 fn main() {
     
+    // create channel from all modules to broker
+    let (out_tx,out_rx) = channel::<Message>();
+
+
     // all currently running modules
-    let mut modules: Vec<Module> = Vec::new();
+    let mut modules = HashMap::<MID,Module>::new();
 
     // start the modules
-    modules.push(Module::new("Camera",camera_handler));
-    modules.push(Module::new("FaceDetector",face_detector_handler));
-    modules.push(Module::new("Display",display_handler));
+    modules.insert(0,Module::new("Camera",0,out_tx.clone(),camera_handler));
+    modules.insert(1,Module::new("FaceDetector",1,out_tx.clone(),face_detector_handler));
+    modules.insert(2,Module::new("Display",2,out_tx.clone(),display_handler));
 
     // and why not another one
-    modules.push(Module::new("OtherDisplay",display_handler));
+    modules.insert(3,Module::new("OtherDisplay",3,out_tx.clone(),display_handler));
 
-    // endless loop
-    loop {
+    // send startup to all modules
+    for module in &modules {
+        module.1.in_tx.send(Message::Startup).expect(&format!("broker: failed to send Startup to module {} ('{}')",module.1.mid,module.1.name));
+    }
 
-        // This logic needs to improve. There should be a timer here also...
-        let mut did_something = false;
+    // still missing: timer
 
-        // for each module
-        for module in &modules {
+    // flush incoming messages
+    while let Ok(message) = out_rx.recv() {
 
-            // flush incoming messages, if any
-            while let Ok(out_message) = module.out_rx.try_recv() {
+        match message {
 
-                did_something = true;
+            // module wants to subscribe to a topic
+            Message::Subscribe(mid,topic) => {
+                println!("broker: subscribing module {} ('{}') to topic '{}'",mid,modules[&mid].name,topic);
+                modules[&mid].subscriptions.borrow_mut().insert(topic);
+            },
 
-                match out_message {
+            // module wants to unsubscribe from a topic
+            Message::Unsubscribe(mid,topic) => {
+                println!("broker: unsubscribing module {} ('{}') from topic '{}'",mid,modules[&mid].name,topic);
+                modules[&mid].subscriptions.borrow_mut().remove(&topic);
+            },
 
-                    // module wants to subscribe to a topic
-                    OutMessage::Subscribe(topic) => {
-                        module.subscriptions.borrow_mut().insert(topic);
-                    },
-
-                    // module wants to unsubscribe from a topic
-                    OutMessage::Unsubscribe(topic) => {
-                        module.subscriptions.borrow_mut().remove(&topic);
-                    },
-
-                    // module sends message to a topic
-                    OutMessage::Generic(topic,app_message) => {
-                        for target in &modules {
-                            if target.subscriptions.borrow_mut().contains(&topic) {
-                                target.in_tx.send(
-                                    InMessage::Generic(topic.clone(),app_message.clone())
-                                ).expect(&format!("broker: failed to send AppMessage to module '{}'",target.name));
-                            }
-                        }
-                    },
+            // module sends message to a topic
+            Message::App(topic,app_message) => {
+                for target in &modules {
+                    if target.1.subscriptions.borrow_mut().contains(&topic) {
+                        target.1.in_tx.send(
+                            Message::App(topic.clone(),app_message.clone())
+                        ).expect(&format!("broker: failed to send AppMessage to module {} ('{}')",target.1.mid,target.1.name));
+                    }
                 }
-            }
-        }
+            },
 
-        // if no messages were passed, add a tiny wait here
-        if !did_something {
-            thread::sleep(Duration::from_millis(100));
+            // discard anything else
+            _ => { },
         }
     }
 }
