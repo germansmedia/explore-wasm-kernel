@@ -17,3 +17,7 @@ And run from the target directory:
 cd experiment/target/debug
 experiment
 ```
+
+### basic-mpsc-pubsub
+
+Initial idea of having a microkernel passing pub/sub messages among worker threads.
